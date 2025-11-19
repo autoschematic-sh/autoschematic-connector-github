@@ -2,8 +2,8 @@ use crate::{
     GitHubConnector,
     addr::GitHubResourceAddress,
     github_ext::{
-        AddCollaboratorRequest, BranchProtectionOpsExt, CollaboratorOpsExt, CreateBranchProtectionRequest,
-        CreateRepositoryRequest, RepositoryOpsExt, UpdateRepositoryRequest,
+        AddCollaboratorRequest, AddTeamCollaboratorRequest, BranchProtectionOpsExt, CollaboratorOpsExt,
+        CreateBranchProtectionRequest, CreateRepositoryRequest, RepositoryOpsExt, UpdateRepositoryRequest,
     },
     op::GitHubConnectorOp,
 };
@@ -50,7 +50,7 @@ impl GitHubConnector {
                             Err(e) => bail!("Failed to create repository {}/{}: {}", owner, repo, e),
                         }
                     }
-                    GitHubConnectorOp::UpdateRepository(_old_config, new_config) => {
+                    GitHubConnectorOp::UpdateRepository(new_config) => {
                         let update_request = UpdateRepositoryRequest {
                             name: None, // Can't rename via this API
                             description: new_config.description.clone(),
@@ -82,6 +82,132 @@ impl GitHubConnector {
                             friendly_message: Some(format!("Deleted GitHub repository {}/{}", owner, repo)),
                         }),
                         Err(e) => bail!("Failed to delete repository {}/{}: {:#?}", owner, repo, e),
+                    },
+                    GitHubConnectorOp::AddCollaborator(principal, role) => match principal {
+                        crate::resource::CollaboratorPrincipal::User(username) => {
+                            let request = AddCollaboratorRequest {
+                                permission: role.to_string(),
+                            };
+                            match client.add_collaborator(owner, repo, &username, &request).await {
+                                Ok(_) => Ok(OpExecResponse {
+                                    outputs: None,
+                                    friendly_message: Some(format!(
+                                        "Added user {} as {} to repository {}/{}",
+                                        username,
+                                        role.to_string(),
+                                        owner,
+                                        repo
+                                    )),
+                                }),
+                                Err(e) => bail!("Failed to add user {} to repository {}/{}: {:#?}", username, owner, repo, e),
+                            }
+                        }
+                        crate::resource::CollaboratorPrincipal::Team(team_slug) => {
+                            let request = AddTeamCollaboratorRequest {
+                                permission: role.to_string(),
+                            };
+                            match client.add_team_to_repository(owner, repo, &team_slug, &request).await {
+                                Ok(_) => Ok(OpExecResponse {
+                                    outputs: None,
+                                    friendly_message: Some(format!(
+                                        "Added team {} with {} permission to repository {}/{}",
+                                        team_slug,
+                                        role.to_string(),
+                                        owner,
+                                        repo
+                                    )),
+                                }),
+                                Err(e) => bail!("Failed to add team {} to repository {}/{}: {:#?}", team_slug, owner, repo, e),
+                            }
+                        }
+                    },
+                    GitHubConnectorOp::UpdateCollaborator(principal, role) => match principal {
+                        crate::resource::CollaboratorPrincipal::User(username) => {
+                            let request = AddCollaboratorRequest {
+                                permission: role.to_string(),
+                            };
+                            match client.update_collaborator_permission(owner, repo, &username, &request).await {
+                                Ok(_) => Ok(OpExecResponse {
+                                    outputs: None,
+                                    friendly_message: Some(format!(
+                                        "Updated user {} to {} role in repository {}/{}",
+                                        username,
+                                        role.to_string(),
+                                        owner,
+                                        repo
+                                    )),
+                                }),
+                                Err(e) => bail!(
+                                    "Failed to update user {} in repository {}/{}: {:#?}",
+                                    username,
+                                    owner,
+                                    repo,
+                                    e
+                                ),
+                            }
+                        }
+                        crate::resource::CollaboratorPrincipal::Team(team_slug) => {
+                            let request = AddTeamCollaboratorRequest {
+                                permission: role.to_string(),
+                            };
+                            match client.update_team_permission(owner, repo, &team_slug, &request).await {
+                                Ok(_) => Ok(OpExecResponse {
+                                    outputs: None,
+                                    friendly_message: Some(format!(
+                                        "Updated team {} to {} permission in repository {}/{}",
+                                        team_slug,
+                                        role.to_string(),
+                                        owner,
+                                        repo
+                                    )),
+                                }),
+                                Err(e) => bail!(
+                                    "Failed to update team {} in repository {}/{}: {:#?}",
+                                    team_slug,
+                                    owner,
+                                    repo,
+                                    e
+                                ),
+                            }
+                        }
+                    },
+                    GitHubConnectorOp::RemoveCollaborator(principal) => match principal {
+                        crate::resource::CollaboratorPrincipal::User(username) => {
+                            match client.remove_collaborator(owner, repo, &username).await {
+                                Ok(_) => Ok(OpExecResponse {
+                                    outputs: None,
+                                    friendly_message: Some(format!(
+                                        "Removed user {} from repository {}/{}",
+                                        username, owner, repo
+                                    )),
+                                }),
+                                Err(e) => bail!(
+                                    "Failed to remove user {} from repository {}/{}: {:#?}",
+                                    username,
+                                    owner,
+                                    repo,
+                                    e
+                                ),
+                            }
+                        }
+                        crate::resource::CollaboratorPrincipal::Team(team_slug) => {
+                            match client.remove_team_from_repository(owner, repo, &team_slug).await {
+                                Ok(_) => Ok(OpExecResponse {
+                                    outputs: None,
+                                    friendly_message: Some(format!(
+                                        "Removed team {} from repository {}/{}",
+                                        team_slug, owner, repo
+                                    )),
+                                }),
+                                Err(e) => bail!(
+                                    "Failed to remove team {} from repository {}/{}: {:#?}",
+                                    team_slug,
+                                    owner,
+                                    repo,
+                                    e
+                                ),
+                            }
+                        }
                     },
                     _ => Err(invalid_op(&addr, &op)),
                 }
@@ -152,7 +278,7 @@ impl GitHubConnector {
                             ),
                         }
                     }
-                    GitHubConnectorOp::UpdateBranchProtection(_old_config, new_config) => {
+                    GitHubConnectorOp::UpdateBranchProtection(new_config) => {
                         let update_request = CreateBranchProtectionRequest {
                             required_status_checks: new_config.required_status_checks.as_ref().map(|checks| {
                                 crate::github_ext::GitHubRequiredStatusChecks {
@@ -232,58 +358,6 @@ impl GitHubConnector {
                             ),
                         }
                     }
-                    _ => Err(invalid_op(&addr, &op)),
-                }
-            }
-            GitHubResourceAddress::Collaborator { owner, repo, username } => {
-                let client = self.client.read().await.clone();
-
-                match op {
-                    GitHubConnectorOp::AddCollaborator(collaborator_config) => {
-                        let add_request = AddCollaboratorRequest {
-                            permission: collaborator_config.role_name.clone(),
-                        };
-
-                        match client.add_collaborator(owner, repo, username, &add_request).await {
-                            Ok(_) => Ok(OpExecResponse {
-                                outputs: None,
-                                friendly_message: Some(format!("Added collaborator {} to {}/{}", username, owner, repo)),
-                            }),
-                            Err(e) => bail!("Failed to add collaborator {} to {}/{}: {}", username, owner, repo, e),
-                        }
-                    }
-                    GitHubConnectorOp::UpdateCollaboratorPermission(_old_config, new_config) => {
-                        let update_request = AddCollaboratorRequest {
-                            permission: new_config.role_name.clone(),
-                        };
-
-                        match client
-                            .update_collaborator_permission(owner, repo, username, &update_request)
-                            .await
-                        {
-                            Ok(_) => Ok(OpExecResponse {
-                                outputs: None,
-                                friendly_message: Some(format!(
-                                    "Updated collaborator {} permissions for {}/{}",
-                                    username, owner, repo
-                                )),
-                            }),
-                            Err(e) => bail!(
-                                "Failed to update collaborator {} permissions for {}/{}: {:#?}",
-                                username,
-                                owner,
-                                repo,
-                                e
-                            ),
-                        }
-                    }
-                    GitHubConnectorOp::RemoveCollaborator => match client.remove_collaborator(owner, repo, username).await {
-                        Ok(_) => Ok(OpExecResponse {
-                            outputs: None,
-                            friendly_message: Some(format!("Removed collaborator {} from {}/{}", username, owner, repo)),
-                        }),
-                        Err(e) => bail!("Failed to remove collaborator {} from {}/{}: {:#?}", username, owner, repo, e),
-                    },
                     _ => Err(invalid_op(&addr, &op)),
                 }
             }

@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
-use octocrab::{Octocrab, Result};
+use octocrab::{Octocrab, Page, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::resource::{CollaboratorPrincipal, Role};
 
 // GitHub API response structures for branch protection
 #[derive(Debug, Serialize, Deserialize)]
@@ -116,31 +120,97 @@ pub struct GitHubBranch {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitHubCollaboratorInfo {
     pub login: String,
+    pub role_name: String,
 }
 
 #[async_trait]
 pub trait ListExt {
-    async fn list_user_repos(&self, username: &str) -> Result<octocrab::Page<octocrab::models::Repository>>;
+    // async fn list_user_repos(&self, username: &str) -> Result<octocrab::Page<octocrab::models::Repository>>;
     async fn list_repo_branches(&self, owner: &str, repo: &str) -> Result<octocrab::Page<GitHubBranch>>;
-    async fn list_repo_collaborators(&self, owner: &str, repo: &str) -> Result<octocrab::Page<GitHubCollaboratorInfo>>;
+    async fn list_repo_collaborators(
+        &self,
+        owner: &str,
+        repo: &str,
+        affiliation: Option<&str>,
+    ) -> Result<HashMap<CollaboratorPrincipal, Role>>;
 }
 
 #[async_trait]
 impl ListExt for Octocrab {
-    async fn list_user_repos(&self, username: &str) -> Result<octocrab::Page<octocrab::models::Repository>> {
-        let route = format!("/users/{}/repos", username);
-        self.get(route, None::<&()>).await
-    }
+    // async fn list_user_repos(&self, username: &str) -> Result<octocrab::Page<octocrab::models::Repository>> {
+    //     let route = format!("/users/{}/repos", username);
+    //     self.get(route, None::<&()>).await
+    // }
 
     async fn list_repo_branches(&self, owner: &str, repo: &str) -> Result<octocrab::Page<GitHubBranch>> {
         let route = format!("/repos/{}/{}/branches", owner, repo);
         self.get(route, None::<&()>).await
     }
 
-    async fn list_repo_collaborators(&self, owner: &str, repo: &str) -> Result<octocrab::Page<GitHubCollaboratorInfo>> {
+    async fn list_repo_collaborators(
+        &self,
+        owner: &str,
+        repo: &str,
+        affiliation: Option<&str>,
+    ) -> Result<HashMap<CollaboratorPrincipal, Role>> {
+        let mut res = HashMap::new();
+
+        #[derive(serde::Serialize)]
+        struct CollabQuery<'a> {
+            affiliation: &'a str, // "direct" | "outside" | "all"
+            per_page: u8,
+            page: u32,
+        }
+
         let route = format!("/repos/{}/{}/collaborators", owner, repo);
-        self.get(route, None::<&()>).await
+        let users: Page<GitHubCollaboratorInfo> = self
+            .get(
+                route,
+                affiliation
+                    .map(|affiliation| CollabQuery {
+                        affiliation: affiliation,
+                        per_page: 100,
+                        page: 1,
+                    })
+                    .as_ref(),
+            )
+            .await?;
+
+        let users = self.all_pages(users).await?;
+
+        for user in users {
+            res.insert(CollaboratorPrincipal::User(user.login), Role::from_str(&user.role_name));
+        }
+
+        Ok(res)
     }
+
+    // async fn list_repo_collaborators(
+    //     &self,
+    //     owner: &str,
+    //     repo: &str,
+    //     affiliation: Option<&str>,
+    // ) -> Result<octocrab::Page<GitHubCollaboratorInfo>> {
+    //     #[derive(serde::Serialize)]
+    //     struct CollabQuery<'a> {
+    //         affiliation: &'a str, // "direct" | "outside" | "all"
+    //         per_page: u8,
+    //         page: u32,
+    //     }
+
+    //     let route = format!("/repos/{}/{}/collaborators", owner, repo);
+    //     self.get(
+    //         route,
+    //         affiliation
+    //             .map(|affiliation| CollabQuery {
+    //                 affiliation: affiliation,
+    //                 per_page: 100,
+    //                 page: 1,
+    //             })
+    //             .as_ref(),
+    //     )
+    //     .await
+    // }
 }
 
 // Structures for repository operations
@@ -201,21 +271,41 @@ pub struct AddCollaboratorRequest {
     pub permission: String, // "pull", "triage", "push", "maintain", "admin"
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddTeamCollaboratorRequest {
+    pub permission: String, // "pull", "triage", "push", "maintain", "admin"
+}
+
 #[async_trait]
 pub trait RepositoryOpsExt {
-    async fn create_repository(&self, owner: &str, repo_data: &CreateRepositoryRequest) -> Result<octocrab::models::Repository>;
-    async fn update_repository(&self, owner: &str, repo: &str, repo_data: &UpdateRepositoryRequest) -> Result<octocrab::models::Repository>;
+    async fn create_repository(&self, owner: &str, repo_data: &CreateRepositoryRequest)
+    -> Result<octocrab::models::Repository>;
+    async fn update_repository(
+        &self,
+        owner: &str,
+        repo: &str,
+        repo_data: &UpdateRepositoryRequest,
+    ) -> Result<octocrab::models::Repository>;
     async fn delete_repository(&self, owner: &str, repo: &str) -> Result<()>;
 }
 
 #[async_trait]
 impl RepositoryOpsExt for Octocrab {
-    async fn create_repository(&self, owner: &str, repo_data: &CreateRepositoryRequest) -> Result<octocrab::models::Repository> {
+    async fn create_repository(
+        &self,
+        _owner: &str,
+        repo_data: &CreateRepositoryRequest,
+    ) -> Result<octocrab::models::Repository> {
         let route = format!("/user/repos");
         self.post(route, Some(repo_data)).await
     }
 
-    async fn update_repository(&self, owner: &str, repo: &str, repo_data: &UpdateRepositoryRequest) -> Result<octocrab::models::Repository> {
+    async fn update_repository(
+        &self,
+        owner: &str,
+        repo: &str,
+        repo_data: &UpdateRepositoryRequest,
+    ) -> Result<octocrab::models::Repository> {
         let route = format!("/repos/{}/{}", owner, repo);
         self.patch(route, Some(repo_data)).await
     }
@@ -228,19 +318,43 @@ impl RepositoryOpsExt for Octocrab {
 
 #[async_trait]
 pub trait BranchProtectionOpsExt {
-    async fn create_branch_protection(&self, owner: &str, repo: &str, branch: &str, protection_data: &CreateBranchProtectionRequest) -> Result<GitHubBranchProtection>;
-    async fn update_branch_protection(&self, owner: &str, repo: &str, branch: &str, protection_data: &CreateBranchProtectionRequest) -> Result<GitHubBranchProtection>;
+    async fn create_branch_protection(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        protection_data: &CreateBranchProtectionRequest,
+    ) -> Result<GitHubBranchProtection>;
+    async fn update_branch_protection(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        protection_data: &CreateBranchProtectionRequest,
+    ) -> Result<GitHubBranchProtection>;
     async fn delete_branch_protection(&self, owner: &str, repo: &str, branch: &str) -> Result<()>;
 }
 
 #[async_trait]
 impl BranchProtectionOpsExt for Octocrab {
-    async fn create_branch_protection(&self, owner: &str, repo: &str, branch: &str, protection_data: &CreateBranchProtectionRequest) -> Result<GitHubBranchProtection> {
+    async fn create_branch_protection(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        protection_data: &CreateBranchProtectionRequest,
+    ) -> Result<GitHubBranchProtection> {
         let route = format!("/repos/{}/{}/branches/{}/protection", owner, repo, branch);
         self.put(route, Some(protection_data)).await
     }
 
-    async fn update_branch_protection(&self, owner: &str, repo: &str, branch: &str, protection_data: &CreateBranchProtectionRequest) -> Result<GitHubBranchProtection> {
+    async fn update_branch_protection(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        protection_data: &CreateBranchProtectionRequest,
+    ) -> Result<GitHubBranchProtection> {
         let route = format!("/repos/{}/{}/branches/{}/protection", owner, repo, branch);
         self.put(route, Some(protection_data)).await
     }
@@ -253,25 +367,91 @@ impl BranchProtectionOpsExt for Octocrab {
 
 #[async_trait]
 pub trait CollaboratorOpsExt {
-    async fn add_collaborator(&self, owner: &str, repo: &str, username: &str, permission_data: &AddCollaboratorRequest) -> Result<()>;
-    async fn update_collaborator_permission(&self, owner: &str, repo: &str, username: &str, permission_data: &AddCollaboratorRequest) -> Result<()>;
+    async fn add_collaborator(
+        &self,
+        owner: &str,
+        repo: &str,
+        username: &str,
+        permission_data: &AddCollaboratorRequest,
+    ) -> Result<()>;
+    async fn update_collaborator_permission(
+        &self,
+        owner: &str,
+        repo: &str,
+        username: &str,
+        permission_data: &AddCollaboratorRequest,
+    ) -> Result<()>;
     async fn remove_collaborator(&self, owner: &str, repo: &str, username: &str) -> Result<()>;
+    async fn add_team_to_repository(
+        &self,
+        owner: &str,
+        repo: &str,
+        team_slug: &str,
+        permission_data: &AddTeamCollaboratorRequest,
+    ) -> Result<()>;
+    async fn update_team_permission(
+        &self,
+        owner: &str,
+        repo: &str,
+        team_slug: &str,
+        permission_data: &AddTeamCollaboratorRequest,
+    ) -> Result<()>;
+    async fn remove_team_from_repository(&self, owner: &str, repo: &str, team_slug: &str) -> Result<()>;
 }
 
 #[async_trait]
 impl CollaboratorOpsExt for Octocrab {
-    async fn add_collaborator(&self, owner: &str, repo: &str, username: &str, permission_data: &AddCollaboratorRequest) -> Result<()> {
+    async fn add_collaborator(
+        &self,
+        owner: &str,
+        repo: &str,
+        username: &str,
+        permission_data: &AddCollaboratorRequest,
+    ) -> Result<()> {
         let route = format!("/repos/{}/{}/collaborators/{}", owner, repo, username);
         self.put(route, Some(permission_data)).await
     }
 
-    async fn update_collaborator_permission(&self, owner: &str, repo: &str, username: &str, permission_data: &AddCollaboratorRequest) -> Result<()> {
+    async fn update_collaborator_permission(
+        &self,
+        owner: &str,
+        repo: &str,
+        username: &str,
+        permission_data: &AddCollaboratorRequest,
+    ) -> Result<()> {
         let route = format!("/repos/{}/{}/collaborators/{}", owner, repo, username);
         self.put(route, Some(permission_data)).await
     }
 
     async fn remove_collaborator(&self, owner: &str, repo: &str, username: &str) -> Result<()> {
         let route = format!("/repos/{}/{}/collaborators/{}", owner, repo, username);
+        self.delete(route, None::<&()>).await
+    }
+
+    async fn add_team_to_repository(
+        &self,
+        owner: &str,
+        repo: &str,
+        team_slug: &str,
+        permission_data: &AddTeamCollaboratorRequest,
+    ) -> Result<()> {
+        let route = format!("/orgs/{}/teams/{}/repos/{}/{}", owner, team_slug, owner, repo);
+        self.put(route, Some(permission_data)).await
+    }
+
+    async fn update_team_permission(
+        &self,
+        owner: &str,
+        repo: &str,
+        team_slug: &str,
+        permission_data: &AddTeamCollaboratorRequest,
+    ) -> Result<()> {
+        let route = format!("/orgs/{}/teams/{}/repos/{}/{}", owner, team_slug, owner, repo);
+        self.put(route, Some(permission_data)).await
+    }
+
+    async fn remove_team_from_repository(&self, owner: &str, repo: &str, team_slug: &str) -> Result<()> {
+        let route = format!("/orgs/{}/teams/{}/repos/{}/{}", owner, team_slug, owner, repo);
         self.delete(route, None::<&()>).await
     }
 }

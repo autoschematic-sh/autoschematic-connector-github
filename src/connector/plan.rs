@@ -4,7 +4,7 @@ use autoschematic_core::{
     connector_op,
     util::{RON, diff_ron_values},
 };
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 impl GitHubConnector {
     pub async fn do_plan(
@@ -13,6 +13,9 @@ impl GitHubConnector {
         current: Option<Vec<u8>>,
         desired: Option<Vec<u8>>,
     ) -> anyhow::Result<Vec<PlanResponseElement>> {
+        let current = current.map(String::from_utf8);
+        let desired = desired.map(String::from_utf8);
+
         let addr = GitHubResourceAddress::from_path(addr)?;
         let mut res = Vec::new();
 
@@ -20,9 +23,8 @@ impl GitHubConnector {
             GitHubResourceAddress::Config => {}
             GitHubResourceAddress::Repository { owner, repo } => match (current, desired) {
                 (None, None) => {}
-                (None, Some(desired_bytes)) => {
-                    let desired_str = std::str::from_utf8(&desired_bytes)?;
-                    let new_repo: resource::GitHubRepository = RON.from_str(desired_str)?;
+                (None, Some(desired)) => {
+                    let new_repo: resource::GitHubRepository = RON.from_str(&desired?)?;
 
                     res.push(connector_op!(
                         GitHubConnectorOp::CreateRepository(new_repo),
@@ -35,26 +37,54 @@ impl GitHubConnector {
                         format!("Delete GitHub repository {}/{}", owner, repo)
                     ));
                 }
-                (Some(current_bytes), Some(desired_bytes)) => {
-                    if current_bytes != desired_bytes {
-                        let current_str = std::str::from_utf8(&current_bytes)?;
-                        let desired_str = std::str::from_utf8(&desired_bytes)?;
-                        let old_repo: resource::GitHubRepository = RON.from_str(current_str)?;
-                        let new_repo: resource::GitHubRepository = RON.from_str(desired_str)?;
+                (Some(current), Some(desired)) => {
+                    if current != desired {
+                        let mut old_repo: resource::GitHubRepository = RON.from_str(&current?)?;
+                        let mut new_repo: resource::GitHubRepository = RON.from_str(&desired?)?;
 
-                        let diff = diff_ron_values(&old_repo, &new_repo).unwrap_or_default();
-                        res.push(connector_op!(
-                            GitHubConnectorOp::UpdateRepository(old_repo, new_repo),
-                            format!("Update GitHub repository {}/{}\n{}", owner, repo, diff)
-                        ));
+                        if old_repo.collaborators != new_repo.collaborators {
+                            for (k, v) in &new_repo.collaborators {
+                                if !old_repo.collaborators.contains_key(k) {
+                                    res.push(connector_op!(
+                                        GitHubConnectorOp::AddCollaborator(k.clone(), v.clone()),
+                                        format!("Add Collaborator {:?} to repo {}/{} with role {:?}", k, owner, repo, v)
+                                    ));
+                                } else if old_repo.collaborators.get(k) != Some(v) {
+                                    res.push(connector_op!(
+                                        GitHubConnectorOp::UpdateCollaborator(k.clone(), v.clone()),
+                                        format!("Update Collaborator {:?} on repo {}/{} to role {:?}", k, owner, repo, v)
+                                    ));
+                                }
+                            }
+                            for (k, _) in &old_repo.collaborators {
+                                if !new_repo.collaborators.contains_key(k) {
+                                    res.push(connector_op!(
+                                        GitHubConnectorOp::RemoveCollaborator(k.clone()),
+                                        format!("Remove Collaborator {:?} from repo {}/{}", k, owner, repo)
+                                    ));
+                                }
+                            }
+                        }
+                        
+                        // Now that we've computed the collaborator updates manually, exclude them from the diff.
+                        old_repo.collaborators = HashMap::new();
+                        new_repo.collaborators = HashMap::new();
+
+                        // Only update repository if other fields changed
+                        if old_repo != new_repo {
+                            let diff = diff_ron_values(&old_repo, &new_repo).unwrap_or_default();
+                            res.push(connector_op!(
+                                GitHubConnectorOp::UpdateRepository(new_repo),
+                                format!("Update GitHub repository {}/{}\n{}", owner, repo, diff)
+                            ));
+                        }
                     }
                 }
             },
             GitHubResourceAddress::BranchProtection { owner, repo, branch } => match (current, desired) {
                 (None, None) => {}
-                (None, Some(desired_bytes)) => {
-                    let desired_str = std::str::from_utf8(&desired_bytes)?;
-                    let new_protection: resource::BranchProtection = RON.from_str(desired_str)?;
+                (None, Some(desired)) => {
+                    let new_protection: resource::BranchProtection = RON.from_str(&desired?)?;
 
                     res.push(connector_op!(
                         GitHubConnectorOp::CreateBranchProtection(new_protection),
@@ -67,48 +97,15 @@ impl GitHubConnector {
                         format!("Delete branch protection for {}/{} branch {}", owner, repo, branch)
                     ));
                 }
-                (Some(current_bytes), Some(desired_bytes)) => {
-                    if current_bytes != desired_bytes {
-                        let current_str = std::str::from_utf8(&current_bytes)?;
-                        let desired_str = std::str::from_utf8(&desired_bytes)?;
-                        let old_protection: resource::BranchProtection = RON.from_str(current_str)?;
-                        let new_protection: resource::BranchProtection = RON.from_str(desired_str)?;
+                (Some(current), Some(desired)) => {
+                    if current != desired {
+                        let old_protection: resource::BranchProtection = RON.from_str(&current?)?;
+                        let new_protection: resource::BranchProtection = RON.from_str(&desired?)?;
                         let diff = diff_ron_values(&old_protection, &new_protection).unwrap_or_default();
 
                         res.push(connector_op!(
-                            GitHubConnectorOp::UpdateBranchProtection(old_protection, new_protection),
+                            GitHubConnectorOp::UpdateBranchProtection(new_protection),
                             format!("Update branch protection for {}/{} branch {}\n{}", owner, repo, branch, diff)
-                        ));
-                    }
-                }
-            },
-            GitHubResourceAddress::Collaborator { owner, repo, username } => match (current, desired) {
-                (None, None) => {}
-                (None, Some(desired_bytes)) => {
-                    let desired_str = std::str::from_utf8(&desired_bytes)?;
-                    let new_collaborator: resource::Collaborator = RON.from_str(desired_str)?;
-
-                    res.push(connector_op!(
-                        GitHubConnectorOp::AddCollaborator(new_collaborator),
-                        format!("Add collaborator {} to {}/{}", username, owner, repo)
-                    ));
-                }
-                (Some(_), None) => {
-                    res.push(connector_op!(
-                        GitHubConnectorOp::RemoveCollaborator,
-                        format!("Remove collaborator {} from {}/{}", username, owner, repo)
-                    ));
-                }
-                (Some(current_bytes), Some(desired_bytes)) => {
-                    if current_bytes != desired_bytes {
-                        let current_str = std::str::from_utf8(&current_bytes)?;
-                        let desired_str = std::str::from_utf8(&desired_bytes)?;
-                        let old_collaborator: resource::Collaborator = RON.from_str(current_str)?;
-                        let new_collaborator: resource::Collaborator = RON.from_str(desired_str)?;
-
-                        res.push(connector_op!(
-                            GitHubConnectorOp::UpdateCollaboratorPermission(old_collaborator, new_collaborator),
-                            format!("Update collaborator {} permissions for {}/{}", username, owner, repo)
                         ));
                     }
                 }

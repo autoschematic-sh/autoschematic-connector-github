@@ -1,7 +1,7 @@
 use crate::{
     GitHubConnector,
     addr::GitHubResourceAddress,
-    github_ext::{BranchProtectionExt, CollaboratorExt},
+    github_ext::{BranchProtectionExt, ListExt},
     resource,
 };
 use anyhow::Context;
@@ -18,8 +18,11 @@ impl GitHubConnector {
         match addr {
             GitHubResourceAddress::Config => Ok(None),
             GitHubResourceAddress::Repository { owner, repo } => {
-                match self.client.read().await.repos(&owner, &repo).get().await {
+                let client = self.client.read().await;
+                match client.repos(&owner, &repo).get().await {
                     Ok(github_repo) => {
+                        let collaborators = client.list_repo_collaborators(&owner, &repo, Some("direct")).await?;
+
                         let repo_resource = resource::GitHubRepository {
                             description: github_repo.description,
                             homepage: github_repo.homepage,
@@ -36,6 +39,7 @@ impl GitHubConnector {
                             default_branch: github_repo.default_branch.unwrap_or_else(|| "main".to_string()),
                             archived: github_repo.archived.unwrap_or(false),
                             disabled: github_repo.disabled.unwrap_or(false),
+                            collaborators: collaborators,
                         };
 
                         get_resource_response!(resource::GitHubResource::Repository(repo_resource))
@@ -81,32 +85,10 @@ impl GitHubConnector {
 
                         get_resource_response!(resource::GitHubResource::BranchProtection(protection_resource))
                     }
-                    Err(_) => Ok(None), // Branch protection doesn't exist
-                }
-            }
-            GitHubResourceAddress::Collaborator { owner, repo, username } => {
-                match self
-                    .client
-                    .read()
-                    .await
-                    .get_collaborator_permission(&owner, &repo, &username)
-                    .await
-                {
-                    Ok(collaborator) => {
-                        let collaborator_resource = resource::Collaborator {
-                            permissions: resource::CollaboratorPermissions {
-                                pull: collaborator.permissions.pull,
-                                triage: collaborator.permissions.triage,
-                                push: collaborator.permissions.push,
-                                maintain: collaborator.permissions.maintain,
-                                admin: collaborator.permissions.admin,
-                            },
-                            role_name: collaborator.role_name,
-                        };
-
-                        get_resource_response!(resource::GitHubResource::Collaborator(collaborator_resource))
+                    Err(e) => {
+                        tracing::debug!("{:#?}", e);
+                        Ok(None)
                     }
-                    Err(_) => Ok(None), // Collaborator doesn't exist
                 }
             }
         }

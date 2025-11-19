@@ -1,40 +1,55 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use crate::config::GitHubConnectorConfig;
-use crate::resource;
+use crate::resource::{self, BranchProtection, GitHubRepository};
 use crate::{addr::GitHubResourceAddress, client::get_client};
-use anyhow::bail;
+use crate::{
+    config::GitHubConnectorConfig,
+    resource::{CollaboratorPrincipal, Role},
+};
 use async_trait::async_trait;
 use autoschematic_core::{
     connector::{
-        Connector, ConnectorOutbox, FilterResponse, GetResourceResponse, OpExecResponse, PlanResponseElement, Resource,
-        ResourceAddress, SkeletonResponse,
+        Connector, ConnectorOutbox, DocIdent, FilterResponse, GetDocResponse, GetResourceResponse, OpExecResponse,
+        PlanResponseElement, Resource, ResourceAddress, SkeletonResponse,
     },
     diag::DiagnosticResponse,
-    skeleton,
-    util::{RON, ron_check_eq, ron_check_syntax},
+    doc_dispatch, skeleton,
+    util::{ron_check_eq, ron_check_syntax},
 };
 use octocrab::Octocrab;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 pub mod get;
 pub mod list;
 pub mod op_exec;
 pub mod plan;
 
-#[derive(Default)]
+// #[derive(Default)]
 pub struct GitHubConnector {
     prefix: PathBuf,
     client: RwLock<Octocrab>,
     config: RwLock<GitHubConnectorConfig>,
+    semaphore: RwLock<tokio::sync::Semaphore>,
+}
+
+impl Default for GitHubConnector {
+    fn default() -> Self {
+        Self {
+            prefix: Default::default(),
+            client: Default::default(),
+            config: Default::default(),
+            semaphore: RwLock::new(tokio::sync::Semaphore::const_new(1)),
+        }
+    }
 }
 
 #[async_trait]
 impl Connector for GitHubConnector {
-    async fn new(name: &str, prefix: &Path, outbox: ConnectorOutbox) -> Result<Arc<dyn Connector>, anyhow::Error>
+    async fn new(_name: &str, prefix: &Path, _outbox: ConnectorOutbox) -> Result<Arc<dyn Connector>, anyhow::Error>
     where
         Self: Sized,
     {
@@ -52,20 +67,25 @@ impl Connector for GitHubConnector {
                 let login = client.current().user().await?.login;
 
                 GitHubConnectorConfig {
-                    owners: vec![login],
+                    users: vec![login],
                     ..Default::default()
                 }
             }
         };
+
         *self.config.write().await = config.clone();
+        *self.semaphore.write().await = Semaphore::new(config.concurrent_requests);
         *self.client.write().await = get_client(Some(config)).await?;
 
         Ok(())
     }
 
     async fn filter(&self, addr: &Path) -> Result<FilterResponse, anyhow::Error> {
-        if let Ok(_addr) = GitHubResourceAddress::from_path(addr) {
-            Ok(FilterResponse::Resource)
+        if let Ok(addr) = GitHubResourceAddress::from_path(addr) {
+            match addr {
+                GitHubResourceAddress::Config => Ok(FilterResponse::Config),
+                _ => Ok(FilterResponse::Resource),
+            }
         } else {
             Ok(FilterResponse::none())
         }
@@ -96,7 +116,12 @@ impl Connector for GitHubConnector {
         let mut res = Vec::new();
 
         res.push(skeleton!(GitHubResourceAddress::Config, GitHubConnectorConfig::default()));
-        // Create example repository skeleton
+
+        let mut collaborators = HashMap::new();
+        collaborators.insert(CollaboratorPrincipal::User("alice".into()), Role::Admin);
+        collaborators.insert(CollaboratorPrincipal::User("bob".into()), Role::Write);
+        collaborators.insert(CollaboratorPrincipal::Team("core-team".into()), Role::Maintain);
+
         res.push(skeleton!(
             GitHubResourceAddress::Repository {
                 owner: String::from("[owner]"),
@@ -118,15 +143,15 @@ impl Connector for GitHubConnector {
                 default_branch: String::from("main"),
                 archived: false,
                 disabled: false,
+                collaborators: collaborators
             })
         ));
 
-        // Create example branch protection skeleton
         res.push(skeleton!(
             GitHubResourceAddress::BranchProtection {
                 owner: String::from("[owner]"),
                 repo: String::from("[repo_name]"),
-                branch: String::from("main"),
+                branch: String::from("[branch_name]"),
             },
             resource::GitHubResource::BranchProtection(resource::BranchProtection {
                 required_status_checks: Some(resource::RequiredStatusChecks {
@@ -151,25 +176,6 @@ impl Connector for GitHubConnector {
             })
         ));
 
-        // Create example collaborator skeleton
-        res.push(skeleton!(
-            GitHubResourceAddress::Collaborator {
-                owner: String::from("[owner]"),
-                repo: String::from("[repo_name]"),
-                username: String::from("[username]"),
-            },
-            resource::GitHubResource::Collaborator(resource::Collaborator {
-                permissions: resource::CollaboratorPermissions {
-                    pull: true,
-                    triage: true,
-                    push: true,
-                    maintain: false,
-                    admin: false,
-                },
-                role_name: String::from("push"),
-            })
-        ));
-
         Ok(res)
     }
 
@@ -177,10 +183,9 @@ impl Connector for GitHubConnector {
         let addr = GitHubResourceAddress::from_path(addr)?;
 
         match addr {
-            GitHubResourceAddress::Config => Ok(a == b),
+            GitHubResourceAddress::Config => ron_check_eq::<GitHubConnectorConfig>(a, b),
             GitHubResourceAddress::Repository { .. } => ron_check_eq::<resource::GitHubRepository>(a, b),
             GitHubResourceAddress::BranchProtection { .. } => ron_check_eq::<resource::BranchProtection>(a, b),
-            GitHubResourceAddress::Collaborator { .. } => ron_check_eq::<resource::Collaborator>(a, b),
         }
     }
 
@@ -191,7 +196,30 @@ impl Connector for GitHubConnector {
             GitHubResourceAddress::Config => ron_check_syntax::<GitHubConnectorConfig>(a),
             GitHubResourceAddress::Repository { .. } => ron_check_syntax::<resource::GitHubRepository>(a),
             GitHubResourceAddress::BranchProtection { .. } => ron_check_syntax::<resource::BranchProtection>(a),
-            GitHubResourceAddress::Collaborator { .. } => ron_check_syntax::<resource::Collaborator>(a),
         }
+    }
+
+    async fn get_docstring(&self, _addr: &Path, ident: DocIdent) -> Result<Option<GetDocResponse>, anyhow::Error> {
+        doc_dispatch!(
+            ident,
+            [GitHubConnectorConfig, GitHubRepository, BranchProtection,],
+            [CollaboratorPrincipal::User(String::new())]
+        )
+        // match ident {
+        //     DocIdent::Struct { name } => match name.as_str() {
+        //         "GitHubConnectorConfig" => Ok(Some(GetDocResponse::from_documented::<GitHubConnectorConfig>())),
+        //         "GitHubRepository" => Ok(Some(GetDocResponse::from_documented::<GitHubRepository>())),
+        //         "BranchProtection" => Ok(Some(GetDocResponse::from_documented::<BranchProtection>())),
+        //         "CollaboratorPrincipal" => Ok(Some(GetDocResponse::from_documented::<CollaboratorPrincipal>())),
+        //         _ => Ok(None),
+        //     },
+        //     DocIdent::Field { parent, name } => match parent.as_str() {
+        //         "GitHubConnectorConfig" => Ok(Some(GitHubConnectorConfig::get_field_docs(name)?.into())),
+        //         "GitHubRepository" => Ok(Some(GitHubRepository::get_field_docs(name)?.into())),
+        //         "BranchProtection" => Ok(Some(BranchProtection::get_field_docs(name)?.into())),
+        //         "CollaboratorPrincipal" => Ok(Some(CollaboratorPrincipal::get_field_docs(name)?.into())),
+        //         _ => Ok(None),
+        //     },
+        // }
     }
 }

@@ -2,24 +2,23 @@ use autoschematic_core::connector::ConnectorOp;
 use serde::{Deserialize, Serialize};
 use autoschematic_core::util::RON;
 
-use super::resource::{GitHubRepository, BranchProtection, Collaborator};
+use crate::resource::{CollaboratorPrincipal, Role};
+
+use super::resource::{GitHubRepository, BranchProtection};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum GitHubConnectorOp {
-    // Repository operations
     CreateRepository(GitHubRepository),
-    UpdateRepository(GitHubRepository, GitHubRepository), // (old, new)
+    UpdateRepository(GitHubRepository),
     DeleteRepository,
 
-    // Branch protection operations
     CreateBranchProtection(BranchProtection),
-    UpdateBranchProtection(BranchProtection, BranchProtection), // (old, new)
+    UpdateBranchProtection(BranchProtection),
     DeleteBranchProtection,
 
-    // Collaborator operations
-    AddCollaborator(Collaborator),
-    UpdateCollaboratorPermission(Collaborator, Collaborator), // (old, new)
-    RemoveCollaborator,
+    AddCollaborator(CollaboratorPrincipal, Role),
+    UpdateCollaborator(CollaboratorPrincipal, Role),
+    RemoveCollaborator(CollaboratorPrincipal),
 }
 
 impl ConnectorOp for GitHubConnectorOp {

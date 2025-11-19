@@ -1,12 +1,15 @@
-use autoschematic_core::{connector::Resource, util::RON};
+use autoschematic_core::{connector::Resource, macros::FieldTypes, util::RON};
+use autoschematic_macros::FieldTypes;
+use documented::{Documented, DocumentedFields};
+use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum GithubRateLimitStrategy {
-    Conservative,
-    Aggressive,
-}
+// #[derive(Debug, Serialize, Deserialize, Clone)]
+// pub enum GithubRateLimitStrategy {
+//     Conservative,
+//     Aggressive,
+// }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum GithubRepositoryOwner {
@@ -14,21 +17,26 @@ pub enum GithubRepositoryOwner {
     Organization(String),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Documented, DocumentedFields, Clone, FieldTypes)]
 #[serde(deny_unknown_fields)]
+/// The primary configuration block for the GithubConnector.
 pub struct GitHubConnectorConfig {
-    pub owners: Vec<String>,
+    /// A list of organization slugs that this connector should try and connect to and work with.
+    pub orgs: Vec<String>,
+    /// A list of user logins that this connector should manage resources under.
+    pub users: Vec<String>,
+    /// If using Github enterprise, the url for the enterprise
     pub enterprise_url: Option<String>,
-    pub rate_limit_strategy: GithubRateLimitStrategy,
-    pub concurrent_requests: u32,
+    /// The number of requests to make in parallel. Defaults to 5.
+    pub concurrent_requests: usize,
 }
 
 impl Default for GitHubConnectorConfig {
     fn default() -> Self {
         Self {
-            owners: Vec::new(),
+            orgs: Vec::new(),
+            users: Vec::new(),
             enterprise_url: None,
-            rate_limit_strategy: GithubRateLimitStrategy::Conservative,
             concurrent_requests: 5,
         }
     }
@@ -50,7 +58,7 @@ impl GitHubConnectorConfig {
 
 impl Resource for GitHubConnectorConfig {
     fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        Ok(RON.to_string(self)?.into())
+        Ok(RON.to_string_pretty(self, PrettyConfig::default())?.into())
     }
 
     fn from_bytes(_addr: &impl autoschematic_core::connector::ResourceAddress, s: &[u8]) -> anyhow::Result<Self>
