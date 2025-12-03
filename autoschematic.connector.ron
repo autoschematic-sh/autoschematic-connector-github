@@ -2,5 +2,5 @@ ConnectorManifest(
     shortname: "github",
     protocol: "binary-tarpc",
     description: "Manages Github repositories, branch protections, and collaborators.",
-    stability: "preview"
+    stability: "beta"
 )
